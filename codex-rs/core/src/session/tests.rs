@@ -10012,6 +10012,135 @@ async fn update_goal_tool_marks_goal_complete() {
 }
 
 #[tokio::test]
+async fn update_goal_tool_schedules_review_gate_after_worktree_tool() {
+    let (session, turn_context, _rx, _codex_home) = make_goal_session_and_context_with_rx().await;
+    let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
+    let create_handler = CreateGoalHandler;
+    let update_handler = UpdateGoalHandler;
+
+    create_handler
+        .handle(ToolInvocation {
+            session: Arc::clone(&session),
+            turn: Arc::clone(&turn_context),
+            cancellation_token: CancellationToken::new(),
+            tracker: Arc::clone(&tracker),
+            call_id: "create-goal".to_string(),
+            tool_name: codex_tools::ToolName::plain("create_goal"),
+            source: ToolCallSource::Direct,
+            payload: ToolPayload::Function {
+                arguments: serde_json::json!({
+                    "objective": "Keep the watcher alive",
+                    "token_budget": 123,
+                })
+                .to_string(),
+            },
+        })
+        .await
+        .expect("initial create_goal should succeed");
+
+    session
+        .goal_runtime_apply(GoalRuntimeEvent::ToolCompleted {
+            turn_context: turn_context.as_ref(),
+            tool_name: "apply_patch",
+        })
+        .await
+        .expect("worktree tool completion should update goal runtime");
+
+    let output = update_handler
+        .handle(ToolInvocation {
+            session: Arc::clone(&session),
+            turn: Arc::clone(&turn_context),
+            cancellation_token: CancellationToken::new(),
+            tracker: Arc::clone(&tracker),
+            call_id: "complete-goal".to_string(),
+            tool_name: codex_tools::ToolName::plain("update_goal"),
+            source: ToolCallSource::Direct,
+            payload: ToolPayload::Function {
+                arguments: serde_json::json!({
+                    "status": "complete",
+                })
+                .to_string(),
+            },
+        })
+        .await
+        .expect("update_goal should schedule the review gate");
+
+    let output: serde_json::Value =
+        serde_json::from_str(&output.log_preview()).expect("review gate output should be JSON");
+    assert_eq!(output["goal"]["status"], "active");
+    assert_eq!(output["reviewGate"]["status"], "pending");
+    assert!(
+        output["reviewGate"]["message"]
+            .as_str()
+            .expect("review gate message should be a string")
+            .contains("built-in review gate")
+    );
+
+    let goal = session
+        .get_thread_goal()
+        .await
+        .expect("read thread goal")
+        .expect("goal should still exist");
+    assert_eq!(goal.status, ThreadGoalStatus::Active);
+
+    session
+        .mark_goal_review_gate_completed(/*passed*/ false)
+        .await;
+    let output = update_handler
+        .handle(ToolInvocation {
+            session: Arc::clone(&session),
+            turn: Arc::clone(&turn_context),
+            cancellation_token: CancellationToken::new(),
+            tracker: Arc::clone(&tracker),
+            call_id: "complete-goal-after-review-findings".to_string(),
+            tool_name: codex_tools::ToolName::plain("update_goal"),
+            source: ToolCallSource::Direct,
+            payload: ToolPayload::Function {
+                arguments: serde_json::json!({
+                    "status": "complete",
+                })
+                .to_string(),
+            },
+        })
+        .await
+        .expect("update_goal should reschedule the review gate after findings");
+
+    let output: serde_json::Value =
+        serde_json::from_str(&output.log_preview()).expect("review gate output should be JSON");
+    assert_eq!(output["goal"]["status"], "active");
+    assert_eq!(output["reviewGate"]["status"], "pending");
+
+    session
+        .mark_goal_review_gate_completed(/*passed*/ true)
+        .await;
+    update_handler
+        .handle(ToolInvocation {
+            session: Arc::clone(&session),
+            turn: Arc::clone(&turn_context),
+            cancellation_token: CancellationToken::new(),
+            tracker,
+            call_id: "complete-goal-after-review".to_string(),
+            tool_name: codex_tools::ToolName::plain("update_goal"),
+            source: ToolCallSource::Direct,
+            payload: ToolPayload::Function {
+                arguments: serde_json::json!({
+                    "status": "complete",
+                })
+                .to_string(),
+            },
+        })
+        .await
+        .expect("update_goal should mark the goal complete after the review gate");
+
+    let goal = session
+        .get_thread_goal()
+        .await
+        .expect("read thread goal")
+        .expect("goal should still exist");
+    assert_eq!(goal.status, ThreadGoalStatus::Complete);
+}
+
+#[tokio::test]
 async fn rejects_escalated_permissions_when_policy_not_on_request() {
     use crate::exec_policy::ExecApprovalRequest;
     use crate::sandboxing::SandboxPermissions;

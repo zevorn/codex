@@ -17,6 +17,7 @@ use super::CompletionBudgetReport;
 use super::UpdateGoalArgs;
 use super::format_goal_error;
 use super::goal_response;
+use super::goal_review_gate_response;
 
 pub struct UpdateGoalHandler;
 
@@ -37,6 +38,7 @@ impl ToolExecutor<ToolInvocation> for UpdateGoalHandler {
         let ToolInvocation {
             session,
             turn,
+            tracker,
             payload,
             ..
         } = invocation;
@@ -66,6 +68,16 @@ impl ToolExecutor<ToolInvocation> for UpdateGoalHandler {
             })
             .await
             .map_err(|err| FunctionCallError::RespondToModel(format_goal_error(err)))?;
+        if args.status == ThreadGoalStatus::Complete {
+            let review_required = tracker.lock().await.get_unified_diff().is_some();
+            if let Some(scheduled) = session
+                .request_goal_completion_review_gate(review_required)
+                .await
+                .map_err(|err| FunctionCallError::RespondToModel(format_goal_error(err)))?
+            {
+                return goal_review_gate_response(scheduled).map(boxed_tool_output);
+            }
+        }
         let goal = session
             .set_thread_goal(
                 turn.as_ref(),

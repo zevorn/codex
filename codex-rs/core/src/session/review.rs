@@ -2,12 +2,50 @@ use super::*;
 use std::sync::atomic::AtomicBool;
 
 /// Spawn a review thread using the given prompt.
-pub(super) async fn spawn_review_thread(
+pub(crate) async fn spawn_review_thread(
     sess: Arc<Session>,
     config: Arc<Config>,
     parent_turn_context: Arc<TurnContext>,
     sub_id: String,
     resolved: crate::review_prompts::ResolvedReviewRequest,
+) {
+    spawn_review_thread_impl(
+        sess,
+        config,
+        parent_turn_context,
+        sub_id,
+        resolved,
+        ReviewTask::new(),
+    )
+    .await;
+}
+
+/// Spawn a review thread that satisfies the active goal review gate on success.
+pub(crate) async fn spawn_goal_review_gate_thread(
+    sess: Arc<Session>,
+    config: Arc<Config>,
+    parent_turn_context: Arc<TurnContext>,
+    sub_id: String,
+    resolved: crate::review_prompts::ResolvedReviewRequest,
+) {
+    spawn_review_thread_impl(
+        sess,
+        config,
+        parent_turn_context,
+        sub_id,
+        resolved,
+        ReviewTask::for_goal_review_gate(),
+    )
+    .await;
+}
+
+async fn spawn_review_thread_impl(
+    sess: Arc<Session>,
+    config: Arc<Config>,
+    parent_turn_context: Arc<TurnContext>,
+    sub_id: String,
+    resolved: crate::review_prompts::ResolvedReviewRequest,
+    review_task: ReviewTask,
 ) {
     let model = config
         .review_model
@@ -142,7 +180,7 @@ pub(super) async fn spawn_review_thread(
     // TODO(ccunningham): Review turns currently rely on `spawn_task` for TurnComplete but do not
     // emit a parent TurnStarted. Consider giving review a full parent turn lifecycle
     // (TurnStarted + TurnComplete) for consistency with other standalone tasks.
-    sess.spawn_task(tc.clone(), input, ReviewTask::new()).await;
+    sess.spawn_task(tc.clone(), input, review_task).await;
 
     // Announce entering review mode so UIs can switch modes.
     let review_request = ReviewRequest {

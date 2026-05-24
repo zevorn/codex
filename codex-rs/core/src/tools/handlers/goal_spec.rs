@@ -76,6 +76,7 @@ pub fn create_update_goal_tool() -> ToolSpec {
         description: r#"Update the existing goal.
 Use this tool only to mark the goal achieved or genuinely blocked.
 Set status to `complete` only when the objective has actually been achieved and no required work remains.
+Before setting status to `complete`, account for the built-in goal review gate, any configured hook feedback, Codex goal memory files, local lesson ledgers, and prior review findings. Treat a pending or failed review gate, blocking hook feedback, or unresolved review finding as evidence that the goal is not complete yet.
 Set status to `blocked` only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change.
 If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least three consecutive resumed goal turns, set status to `blocked` again.
 Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; set status to `blocked`.
@@ -115,5 +116,9 @@ mod tests {
             status.enum_values,
             Some(vec![json!("complete"), json!("blocked")])
         );
+        assert!(tool.description.contains("built-in goal review gate"));
+        assert!(tool.description.contains("configured hook feedback"));
+        assert!(tool.description.contains("Codex goal memory files"));
+        assert!(tool.description.contains("local lesson ledgers"));
     }
 }

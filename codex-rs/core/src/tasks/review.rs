@@ -39,11 +39,21 @@ static REVIEW_EXIT_SUCCESS_TEMPLATE: LazyLock<Template> = LazyLock::new(|| {
 });
 
 #[derive(Clone, Copy)]
-pub(crate) struct ReviewTask;
+pub(crate) struct ReviewTask {
+    completes_goal_review_gate: bool,
+}
 
 impl ReviewTask {
     pub(crate) fn new() -> Self {
-        Self
+        Self {
+            completes_goal_review_gate: false,
+        }
+    }
+
+    pub(crate) fn for_goal_review_gate() -> Self {
+        Self {
+            completes_goal_review_gate: true,
+        }
     }
 }
 
@@ -90,6 +100,19 @@ impl SessionTask for ReviewTask {
             None => None,
         };
         if !cancellation_token.is_cancelled() {
+            if self.completes_goal_review_gate {
+                if let Some(output) = output.as_ref()
+                    && let Err(err) = session.session.record_goal_review_gate_output(output).await
+                {
+                    tracing::warn!("failed to record goal review gate output: {err}");
+                }
+                session
+                    .session
+                    .mark_goal_review_gate_completed(
+                        output.as_ref().is_some_and(review_output_passes_goal_gate),
+                    )
+                    .await;
+            }
             exit_review_mode(session.clone_session(), output.clone(), ctx.clone()).await;
         }
         None
@@ -217,6 +240,15 @@ fn parse_review_output_event(text: &str) -> ReviewOutputEvent {
     }
 }
 
+fn review_output_passes_goal_gate(output: &ReviewOutputEvent) -> bool {
+    let correctness = output.overall_correctness.trim().to_ascii_lowercase();
+    let explanation = output.overall_explanation.trim().to_ascii_lowercase();
+    output.findings.is_empty()
+        && !correctness.contains("incorrect")
+        && !explanation.contains("incorrect")
+        && (!explanation.is_empty() || !correctness.is_empty())
+}
+
 /// Emits an ExitedReviewMode Event with optional ReviewOutput,
 /// and records a developer message with the review output.
 pub(crate) async fn exit_review_mode(
@@ -306,7 +338,13 @@ fn normalize_review_template_line_endings(template: &str) -> Cow<'_, str> {
 mod tests {
     use super::normalize_review_template_line_endings;
     use super::render_review_exit_success;
+    use super::review_output_passes_goal_gate;
+    use codex_protocol::protocol::ReviewCodeLocation;
+    use codex_protocol::protocol::ReviewFinding;
+    use codex_protocol::protocol::ReviewLineRange;
+    use codex_protocol::protocol::ReviewOutputEvent;
     use pretty_assertions::assert_eq;
+    use std::path::PathBuf;
 
     #[test]
     fn render_review_exit_success_replaces_results_placeholder() {
@@ -322,5 +360,51 @@ mod tests {
             normalize_review_template_line_endings("<user_action>\r\n  <results>\r\n  None.\r\n"),
             "<user_action>\n  <results>\n  None.\n"
         );
+    }
+
+    #[test]
+    fn review_output_gate_only_passes_nonempty_output_without_findings() {
+        assert!(review_output_passes_goal_gate(&ReviewOutputEvent {
+            findings: Vec::new(),
+            overall_correctness: "patch is correct".to_string(),
+            overall_explanation: String::new(),
+            overall_confidence_score: 0.91,
+        }));
+        assert!(review_output_passes_goal_gate(&ReviewOutputEvent {
+            findings: Vec::new(),
+            overall_correctness: String::new(),
+            overall_explanation: "No findings.".to_string(),
+            overall_confidence_score: 0.91,
+        }));
+        assert!(!review_output_passes_goal_gate(
+            &ReviewOutputEvent::default()
+        ));
+        assert!(!review_output_passes_goal_gate(&ReviewOutputEvent {
+            findings: Vec::new(),
+            overall_correctness: "patch is incorrect".to_string(),
+            overall_explanation: "The work still misses a required behavior.".to_string(),
+            overall_confidence_score: 0.9,
+        }));
+        assert!(!review_output_passes_goal_gate(&ReviewOutputEvent {
+            findings: Vec::new(),
+            overall_correctness: String::new(),
+            overall_explanation: "The patch is incorrect.".to_string(),
+            overall_confidence_score: 0.9,
+        }));
+        assert!(!review_output_passes_goal_gate(&ReviewOutputEvent {
+            findings: vec![ReviewFinding {
+                title: "Fix the gate".to_string(),
+                body: "The review gate must not pass when review finds an issue.".to_string(),
+                confidence_score: 0.9,
+                priority: 1,
+                code_location: ReviewCodeLocation {
+                    absolute_file_path: PathBuf::from("/tmp/review_gate.rs"),
+                    line_range: ReviewLineRange { start: 1, end: 1 },
+                },
+            }],
+            overall_correctness: "patch is incorrect".to_string(),
+            overall_explanation: "Needs another round.".to_string(),
+            overall_confidence_score: 0.9,
+        }));
     }
 }

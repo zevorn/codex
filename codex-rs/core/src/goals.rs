@@ -44,6 +44,13 @@ use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 use tokio::sync::SemaphorePermit;
 
+mod project_data;
+mod review_gate;
+use project_data::GoalProjectDataRunPolicy;
+use project_data::record_goal_project_data;
+pub(crate) use review_gate::GoalReviewGateScheduled;
+use review_gate::GoalReviewGateState;
+
 pub(crate) struct SetGoalRequest {
     pub(crate) objective: Option<String>,
     pub(crate) status: Option<ThreadGoalStatus>,
@@ -169,6 +176,7 @@ pub(crate) enum GoalRuntimeEvent<'a> {
 pub(crate) struct GoalRuntimeState {
     pub(crate) state_db: Mutex<Option<StateDbHandle>>,
     pub(crate) budget_limit_reported_goal_id: Mutex<Option<String>>,
+    review_gate: Mutex<GoalReviewGateState>,
     accounting_lock: Semaphore,
     accounting: Mutex<GoalAccountingSnapshot>,
     continuation_turn_id: Mutex<Option<String>>,
@@ -185,6 +193,7 @@ impl GoalRuntimeState {
         Self {
             state_db: Mutex::new(None),
             budget_limit_reported_goal_id: Mutex::new(None),
+            review_gate: Mutex::new(GoalReviewGateState::default()),
             accounting_lock: Semaphore::new(/*permits*/ 1),
             accounting: Mutex::new(GoalAccountingSnapshot::new()),
             continuation_turn_id: Mutex::new(None),
@@ -357,6 +366,8 @@ impl Session {
                 tool_name,
             } => Box::pin(async move {
                 if tool_name != UPDATE_GOAL_TOOL_NAME {
+                    self.invalidate_goal_review_gate_after_tool_completion(tool_name)
+                        .await;
                     self.account_thread_goal_progress(
                         turn_context,
                         BudgetLimitSteering::Allowed,
@@ -550,8 +561,18 @@ impl Session {
         }
         self.emit_goal_resumed_metric_if_status_changed(previous_status_for_goal, goal_status);
         self.emit_goal_terminal_metrics_if_status_changed(previous_status_for_goal, &goal);
+        let run_policy = if objective.is_some() || token_budget.is_some() {
+            GoalProjectDataRunPolicy::CreateNew
+        } else {
+            GoalProjectDataRunPolicy::ReuseLatest
+        };
+        self.record_goal_project_data_best_effort(&goal, run_policy)
+            .await;
         let goal = protocol_goal_from_state(goal);
         *self.goal_runtime.budget_limit_reported_goal_id.lock().await = None;
+        if objective.is_some() || goal_status != codex_state::ThreadGoalStatus::Active {
+            self.reset_goal_review_gate().await;
+        }
         let newly_active_goal = goal_status == codex_state::ThreadGoalStatus::Active
             && (replacing_goal
                 || previous_status
@@ -627,8 +648,11 @@ impl Session {
         .await;
         let goal_id = goal.goal_id.clone();
         self.emit_goal_created_metric();
+        self.record_goal_project_data_best_effort(&goal, GoalProjectDataRunPolicy::CreateNew)
+            .await;
         let goal = protocol_goal_from_state(goal);
         *self.goal_runtime.budget_limit_reported_goal_id.lock().await = None;
+        self.reset_goal_review_gate().await;
 
         let current_token_usage = self.total_token_usage().await.unwrap_or_default();
         self.mark_active_goal_accounting(
@@ -673,9 +697,19 @@ impl Session {
             .and_then(|previous_goal| (!replaced_existing_goal).then_some(previous_goal.status));
         self.emit_goal_resumed_metric_if_status_changed(previous_status, goal.status);
         self.emit_goal_terminal_metrics_if_status_changed(previous_status, &goal);
+        let run_policy = if previous_goal.is_none() || replaced_existing_goal || objective_changed {
+            GoalProjectDataRunPolicy::CreateNew
+        } else {
+            GoalProjectDataRunPolicy::ReuseLatest
+        };
+        self.record_goal_project_data_best_effort(&goal, run_policy)
+            .await;
         let goal_for_steering = objective_changed.then(|| protocol_goal_from_state(goal.clone()));
         let goal_id = goal.goal_id;
         let status = goal.status;
+        if objective_changed || status != codex_state::ThreadGoalStatus::Active {
+            self.reset_goal_review_gate().await;
+        }
         match status {
             codex_state::ThreadGoalStatus::Active => {
                 let turn_id = self
@@ -711,11 +745,23 @@ impl Session {
 
     async fn clear_stopped_thread_goal_runtime_state(&self) {
         *self.goal_runtime.budget_limit_reported_goal_id.lock().await = None;
+        self.reset_goal_review_gate().await;
         let mut accounting = self.goal_runtime.accounting.lock().await;
         if let Some(turn) = accounting.turn.as_mut() {
             turn.clear_active_goal();
         }
         accounting.wall_clock.clear_active_goal();
+    }
+
+    async fn record_goal_project_data_best_effort(
+        &self,
+        goal: &codex_state::ThreadGoal,
+        run_policy: GoalProjectDataRunPolicy,
+    ) {
+        let config = self.get_config().await;
+        if let Err(err) = record_goal_project_data(&config, goal, run_policy).await {
+            tracing::warn!("failed to record Codex goal project data: {err}");
+        }
     }
 
     async fn clear_active_goal_accounting(&self, turn_context: &TurnContext) {
@@ -1068,6 +1114,11 @@ impl Session {
                 if matches!(terminal_metric_emission, TerminalMetricEmission::Emit) {
                     self.emit_goal_terminal_metrics_if_status_changed(previous_status, &goal);
                 }
+                self.record_goal_project_data_best_effort(
+                    &goal,
+                    GoalProjectDataRunPolicy::ReuseLatest,
+                )
+                .await;
                 goal
             }
             codex_state::GoalAccountingOutcome::Unchanged(_) => return Ok(()),
@@ -1160,6 +1211,11 @@ impl Session {
                 if matches!(terminal_metric_emission, TerminalMetricEmission::Emit) {
                     self.emit_goal_terminal_metrics_if_status_changed(previous_status, &goal);
                 }
+                self.record_goal_project_data_best_effort(
+                    &goal,
+                    GoalProjectDataRunPolicy::ReuseLatest,
+                )
+                .await;
                 self.goal_runtime
                     .accounting
                     .lock()
@@ -1222,6 +1278,8 @@ impl Session {
             return Ok(());
         };
         self.emit_goal_terminal_metrics_if_status_changed(previous_status, &goal);
+        self.record_goal_project_data_best_effort(&goal, GoalProjectDataRunPolicy::ReuseLatest)
+            .await;
         let goal = protocol_goal_from_state(goal);
         *self.goal_runtime.budget_limit_reported_goal_id.lock().await = None;
         self.clear_active_goal_accounting(turn_context).await;
@@ -1288,6 +1346,9 @@ impl Session {
 
     async fn maybe_continue_goal_if_idle_runtime(self: &Arc<Self>) {
         self.maybe_start_turn_for_pending_work().await;
+        if self.maybe_start_goal_review_gate_turn().await {
+            return;
+        }
         self.maybe_start_goal_continuation_turn().await;
     }
 
@@ -1767,6 +1828,16 @@ mod tests {
         assert!(prompt.contains("same blocking condition"));
         assert!(prompt.contains("original/user-triggered turn"));
         assert!(prompt.contains("truly at an impasse"));
+        assert!(prompt.contains("Project memory and built-in review gate"));
+        assert!(prompt.contains("`.codex/goal/`"));
+        assert!(prompt.contains("`memory.md`"));
+        assert!(prompt.contains("`runs/goal-YYYY-MM-DD_HH-MM-SSZ/goal.md`"));
+        assert!(prompt.contains("`status.md`"));
+        assert!(prompt.contains("Codex-owned project data"));
+        assert!(!prompt.contains(&["humani", "ze"].concat()));
+        assert!(prompt.contains("expect completion to pass the goal's built-in review gate"));
+        assert!(prompt.contains("must not occupy, replace, or bypass user/project Stop hooks"));
+        assert!(prompt.contains("Include relevant Codex goal memory entries, previous review findings, built-in review gate results, configured hook feedback, and per-round summaries"));
         assert!(!prompt.contains("budgetLimited"));
         assert!(!prompt.contains("status \"paused\""));
     }
@@ -1816,6 +1887,16 @@ mod tests {
         );
         assert!(prompt.contains("Token budget: 10000"));
         assert!(prompt.contains("Tokens remaining: 8766"));
+        assert!(prompt.contains("Project memory and built-in review gate"));
+        assert!(prompt.contains("`.codex/goal/`"));
+        assert!(prompt.contains("`memory.md`"));
+        assert!(prompt.contains("`runs/goal-YYYY-MM-DD_HH-MM-SSZ/goal.md`"));
+        assert!(prompt.contains("`status.md`"));
+        assert!(prompt.contains("Codex-owned project data"));
+        assert!(!prompt.contains(&["humani", "ze"].concat()));
+        assert!(
+            prompt.contains("continue the updated goal instead of declaring completion manually")
+        );
         assert!(
             prompt
                 .contains("Do not call update_goal unless the updated goal is actually complete.")

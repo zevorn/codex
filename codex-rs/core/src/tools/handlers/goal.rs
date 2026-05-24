@@ -5,6 +5,7 @@
 //! `update_goal` can only mark the existing goal complete or blocked.
 
 use crate::function_tool::FunctionCallError;
+use crate::goals::GoalReviewGateScheduled;
 use crate::tools::context::FunctionToolOutput;
 use codex_protocol::protocol::ThreadGoal;
 use codex_protocol::protocol::ThreadGoalStatus;
@@ -39,6 +40,21 @@ struct GoalToolResponse {
     goal: Option<ThreadGoal>,
     remaining_tokens: Option<i64>,
     completion_budget_report: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GoalReviewGateToolResponse {
+    goal: ThreadGoal,
+    remaining_tokens: Option<i64>,
+    review_gate: GoalReviewGateToolStatus,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GoalReviewGateToolStatus {
+    status: &'static str,
+    message: &'static str,
 }
 
 #[derive(Clone, Copy)]
@@ -83,6 +99,25 @@ fn goal_response(
     let response =
         serde_json::to_string_pretty(&GoalToolResponse::new(goal, completion_budget_report))
             .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
+    Ok(FunctionToolOutput::from_text(response, Some(true)))
+}
+
+fn goal_review_gate_response(
+    scheduled: GoalReviewGateScheduled,
+) -> Result<FunctionToolOutput, FunctionCallError> {
+    let remaining_tokens = scheduled
+        .goal
+        .token_budget
+        .map(|budget| (budget - scheduled.goal.tokens_used).max(0));
+    let response = serde_json::to_string_pretty(&GoalReviewGateToolResponse {
+        goal: scheduled.goal,
+        remaining_tokens,
+        review_gate: GoalReviewGateToolStatus {
+            status: "pending",
+            message: "Goal completion is waiting on the built-in review gate. Do not mark the goal complete yet. Wait for review output, address any findings, and call update_goal with status `complete` again only when the gate has passed and no required work remains.",
+        },
+    })
+    .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
     Ok(FunctionToolOutput::from_text(response, Some(true)))
 }
 

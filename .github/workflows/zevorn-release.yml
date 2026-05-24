@@ -1,0 +1,141 @@
+name: zevorn-release
+
+on:
+  push:
+    tags:
+      - "v*.*.*-zevorn"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: codex-rs
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            binary: codex
+            archive_ext: tar.gz
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            binary: codex
+            archive_ext: tar.gz
+          - runner: macos-15
+            target: x86_64-apple-darwin
+            binary: codex
+            archive_ext: tar.gz
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: codex.exe
+            archive_ext: zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@a0b273b48ed29de4470960879e8381ff45632f26 # 1.93.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build codex
+        shell: bash
+        run: cargo build --release --target "${{ matrix.target }}" -p codex-cli --bin codex
+
+      - name: Package codex
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${GITHUB_REF_NAME}"
+          target="${{ matrix.target }}"
+          binary="${{ matrix.binary }}"
+          release_dir="target/${target}/release"
+          binary_path="${release_dir}/${binary}"
+          archive_name="codex-${tag}-${target}.${{ matrix.archive_ext }}"
+          archive_path="../release-assets/${archive_name}"
+          stage_dir="${RUNNER_TEMP}/codex-${target}"
+
+          test -f "${binary_path}" || {
+            echo "Binary ${binary_path} not found"
+            exit 1
+          }
+
+          rm -rf "${stage_dir}"
+          mkdir -p "${stage_dir}" "../release-assets"
+          cp "${binary_path}" "${stage_dir}/${binary}"
+          cp ../LICENSE ../README.md "${stage_dir}/"
+
+          if [[ "${{ matrix.archive_ext }}" == "zip" ]]; then
+            7z a "${archive_path}" "${stage_dir}"/*
+          else
+            tar -C "${stage_dir}" -czf "${archive_path}" .
+          fi
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-${{ github.ref_name }}-${{ matrix.target }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release assets
+    runs-on: ubuntu-24.04
+    needs: build
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download package artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Add checksum manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum * | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Generate release notes
+        id: release_notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          notes_path="${RUNNER_TEMP}/release-notes.md"
+          git log -1 --format=%B "${commit}" > "${notes_path}"
+          echo >> "${notes_path}"
+          echo "path=${notes_path}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body_path: ${{ steps.release_notes.outputs.path }}
+          files: release-assets/*
+          prerelease: true
+          overwrite_files: true
+          make_latest: false

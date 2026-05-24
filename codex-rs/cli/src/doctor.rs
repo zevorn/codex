@@ -58,6 +58,7 @@ use codex_terminal_detection::Multiplexer;
 use codex_terminal_detection::TerminalInfo;
 use codex_terminal_detection::TerminalName;
 use codex_terminal_detection::terminal_info;
+use codex_tui::CODEX_CLI_VERSION;
 use codex_tui::Cli as TuiCli;
 use codex_utils_cli::CliConfigOverrides;
 use http::HeaderMap;
@@ -447,7 +448,7 @@ async fn build_report(
         schema_version: 1,
         generated_at: generated_at(),
         overall_status,
-        codex_version: env!("CARGO_PKG_VERSION").to_string(),
+        codex_version: CODEX_CLI_VERSION.to_string(),
         checks,
     }
 }

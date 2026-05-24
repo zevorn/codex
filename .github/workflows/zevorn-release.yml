@@ -57,7 +57,10 @@ jobs:
 
       - name: Build codex
         shell: bash
-        run: cargo build --release --target "${{ matrix.target }}" -p codex-cli --bin codex
+        run: |
+          set -euo pipefail
+          CODEX_RELEASE_VERSION="${GITHUB_REF_NAME#v}" \
+            cargo build --release --target "${{ matrix.target }}" -p codex-cli --bin codex
 
       - name: Package codex
         shell: bash

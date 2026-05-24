@@ -112,6 +112,15 @@ pub use crate::transport::auth::WebsocketAuthCliMode;
 const LOG_FORMAT_ENV_VAR: &str = "LOG_FORMAT";
 const OTEL_SERVICE_NAME: &str = "codex-app-server";
 
+/// The app-server version embedded at compile time.
+///
+/// Fork release builds can set `CODEX_RELEASE_VERSION` to embed a tag-derived
+/// version while keeping source builds on the workspace package version.
+pub const CODEX_APP_SERVER_VERSION: &str = match option_env!("CODEX_RELEASE_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LogFormat {
     Default,
@@ -507,7 +516,7 @@ pub async fn run_main_with_transport_options(
 
     let otel = codex_core::otel_init::build_provider(
         &config,
-        env!("CARGO_PKG_VERSION"),
+        CODEX_APP_SERVER_VERSION,
         Some(OTEL_SERVICE_NAME),
         default_analytics_enabled,
     )

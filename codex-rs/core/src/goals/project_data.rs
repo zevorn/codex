@@ -62,7 +62,7 @@ impl GoalProjectData {
         let status_file = self.run_dir.join(STATUS_FILE);
         let reviews_dir = self.reviews_dir.as_path().display();
         format!(
-            "Codex goal data:\n- Use Codex-owned project goal data under `{goal_root}`. This path is derived from the top-level project `.codex` directory.\n- Shared project memory lives at `{memory_file}` and can contain reusable lessons across goals.\n- Current goal run data lives under `{run_dir}`. Inspect `{}`, `{}`, and `{reviews_dir}/round-*-review-result.md` when present.\n- For this goal review gate, do not inspect legacy or third-party goal/memory directories. Treat unresolved findings from Codex goal-data files as blockers.",
+            "Codex goal data:\n- Use Codex-owned project goal data under `{goal_root}`. This path is derived from the top-level project `.codex` directory.\n- Shared project memory lives at `{memory_file}` and can contain reusable lessons across goals.\n- Current goal run data lives under `{run_dir}`. Inspect `{}`, `{}`, and `{reviews_dir}/round-*-review-result.md` when present.\n- For this goal review gate, do not inspect legacy or third-party goal/memory directories. Treat unresolved findings from Codex goal-data files as blockers only when they still apply to the scoped modifications.",
             goal_file.as_path().display(),
             status_file.as_path().display()
         )

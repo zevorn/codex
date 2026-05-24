@@ -114,7 +114,7 @@ fn goal_review_gate_response(
         remaining_tokens,
         review_gate: GoalReviewGateToolStatus {
             status: "pending",
-            message: "Goal completion is waiting on the built-in review gate. Do not mark the goal complete yet. Wait for review output, address any findings, and call update_goal with status `complete` again only when the gate has passed and no required work remains.",
+            message: "Goal completion is waiting on the built-in review gate. Stop this turn now and wait for the review to finish before doing any more work. After the review result is available, process that result first: address findings when present, or call update_goal with status `complete` only if the gate passed and no required work remains.",
         },
     })
     .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;

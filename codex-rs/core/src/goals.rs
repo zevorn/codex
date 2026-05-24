@@ -1349,6 +1349,9 @@ impl Session {
         if self.maybe_start_goal_review_gate_turn().await {
             return;
         }
+        if self.maybe_start_goal_review_result_turn().await {
+            return;
+        }
         self.maybe_start_goal_continuation_turn().await;
     }
 

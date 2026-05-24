@@ -110,6 +110,7 @@ impl SessionTask for ReviewTask {
                     .session
                     .mark_goal_review_gate_completed(
                         output.as_ref().is_some_and(review_output_passes_goal_gate),
+                        output.as_ref(),
                     )
                     .await;
             }

@@ -10084,7 +10084,7 @@ async fn update_goal_tool_schedules_review_gate_after_worktree_tool() {
     assert_eq!(goal.status, ThreadGoalStatus::Active);
 
     session
-        .mark_goal_review_gate_completed(/*passed*/ false)
+        .mark_goal_review_gate_completed(/*passed*/ false, /*output*/ None)
         .await;
     let output = update_handler
         .handle(ToolInvocation {
@@ -10111,7 +10111,7 @@ async fn update_goal_tool_schedules_review_gate_after_worktree_tool() {
     assert_eq!(output["reviewGate"]["status"], "pending");
 
     session
-        .mark_goal_review_gate_completed(/*passed*/ true)
+        .mark_goal_review_gate_completed(/*passed*/ true, /*output*/ None)
         .await;
     update_handler
         .handle(ToolInvocation {
